@@ -635,8 +635,12 @@ def _render_result_tab() -> None:
         st.info("まだ計算結果がありません。各ページを入力してから計算実行を押してください。")
         return
 
-    _render_comps_results(last_result["ranges"])
-    _render_dcf_results(last_result["dcf_result"])
+    # 結果を2つに分離して表示：Comps（類似企業比較）とDCF
+    result_tabs = st.tabs(["類似企業比較（Comps）", "DCF法"])
+    with result_tabs[0]:
+        _render_comps_results(last_result["ranges"])
+    with result_tabs[1]:
+        _render_dcf_results(last_result["dcf_result"])
 
 
 def render_app() -> None:
