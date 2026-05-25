@@ -291,8 +291,8 @@ def calculate_dcf_valuation(
     """Calculate a simple DCF valuation from manually entered assumptions."""
 
     validate_company_input(target, include_sales=True)
-    if forecast_years < 1 or forecast_years > 5:
-        raise ValueError("予測期間は1年から5年の範囲で入力してください。")
+    if forecast_years < 5 or forecast_years > 10:
+        raise ValueError("予測期間は5年から10年の範囲で入力してください。")
 
     discount_rate = discount_rate_pct / 100.0
     terminal_growth_rate = terminal_growth_rate_pct / 100.0
@@ -523,8 +523,8 @@ def _render_assumption_tab() -> None:
     with col1:
         forecast_years = st.slider(
             "予測期間",
-            min_value=1,
-            max_value=5,
+            min_value=5,
+            max_value=10,
             value=int(default_assumptions.get("forecast_years", DEFAULT_FORECAST_YEARS)),
             step=1,
             key="forecast_years",
