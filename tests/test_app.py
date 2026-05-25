@@ -1,151 +1,103 @@
 import unittest
 
-from app import calculate_dcf_valuation, calculate_metrics, compute_valuation_range
+from app import (
+    compute_ev,
+    compute_multiples_for_company,
+    aggregate_peer_stats,
+    apply_multiples_to_target,
+)
 
 
-class GlobalValuationTests(unittest.TestCase):
+class CompsTemplateTests(unittest.TestCase):
     def setUp(self):
+        # Construct TargetCo and 3 CompCos such that multiples are integer-valued
+        # This ensures exact equality checks (no floating rounding surprises).
+
+        # TargetCo
         self.target = {
-            "market_cap": 50000.0,
-            "net_income": 500.0,
-            "net_assets": 6000.0,
-            "operating_income": 700.0,
-            "depreciation": 300.0,
-            "sub_debt": 2000.0,
-            "cash": 1500.0,
-            "sales": 0.0,
+            "company_name": "TargetCo",
+            "market_cap": 0.0,
+            "shares_outstanding": 100.0,
+            "cash": 0.0,
+            "sub_debt": 0.0,
+            "minority": 0.0,
+            # Target metrics (LTM, CY+1, CY+2)
+            "sales_ltm": 200.0,
+            "sales_cy1": 220.0,
+            "sales_cy2": 242.0,
+            "ebitda_ltm": 400.0,
+            "ebitda_cy1": 440.0,
+            "ebitda_cy2": 484.0,
+            "ebit_ltm": 100.0,
+            "ebit_cy1": 110.0,
+            "ebit_cy2": 121.0,
+            "net_income_ltm": 40.0,
+            "net_income_cy1": 44.0,
+            "net_income_cy2": 48.4,
         }
 
+        # Create 3 identical comps where EV=1000 and multiples are integers
+        # Set sales=100, ebitda=200, ebit=50, net_income=20, market_cap=1000, cash=0, sub_debt=0
         self.peers = []
-        for index in range(1, 6):
-            self.peers.append(
-                {
-                    "market_cap": 10000.0 * index,
-                    "net_income": 500.0 * index,
-                    "net_assets": 5000.0 * index,
-                    "operating_income": 800.0 * index,
-                    "depreciation": 200.0 * index,
-                    "sub_debt": 2000.0 * index,
-                    "cash": 2000.0 * index,
-                    "sales": 1000.0 * index,
-                }
-            )
+        for i in range(3):
+            peer = {
+                "company_name": f"Comp{i+1}",
+                "market_cap": 1000.0,
+                "shares_outstanding": 10.0,
+                "cash": 0.0,
+                "sub_debt": 0.0,
+                "minority": 0.0,
+                "sales_ltm": 100.0,
+                "sales_cy1": 100.0,
+                "sales_cy2": 100.0,
+                "ebitda_ltm": 200.0,
+                "ebitda_cy1": 200.0,
+                "ebitda_cy2": 200.0,
+                "ebit_ltm": 50.0,
+                "ebit_cy1": 50.0,
+                "ebit_cy2": 50.0,
+                "net_income_ltm": 20.0,
+                "net_income_cy1": 20.0,
+                "net_income_cy2": 20.0,
+            }
+            self.peers.append(peer)
 
-    def test_calculate_metrics_success(self):
-        metrics = calculate_metrics(self.peers[0])
-        self.assertEqual(metrics["per"], 20.0)
-        self.assertEqual(metrics["pbr"], 2.0)
-        self.assertEqual(metrics["ev_ebitda"], 10.0)
-        self.assertEqual(metrics["ev_ebit"], 12.5)
+    def test_ev_computation(self):
+        # EV for peers should be market_cap + debts + minority - cash = 1000
+        for p in self.peers:
+            ev = compute_ev(p)
+            self.assertEqual(ev, 1000.0)
 
-    def test_compute_valuation_range_exact(self):
-        ranges = compute_valuation_range(self.target, self.peers)
+    def test_multiples_per_peer(self):
+        # For each peer multiples should be exact integers: EV/Sales=10, EV/EBITDA=5, EV/EBIT=20, P/E=50
+        expected = {"ev_sales": 10.0, "ev_ebitda": 5.0, "ev_ebit": 20.0, "pe": 50.0}
+        for p in self.peers:
+            m = compute_multiples_for_company(p)
+            for metric, val in expected.items():
+                # check LTM
+                self.assertEqual(m[metric]["LTM"], val)
 
-        self.assertIn("per", ranges)
-        self.assertIn("pbr", ranges)
-        self.assertIn("ev_ebitda", ranges)
-        self.assertIn("ev_ebit", ranges)
+    def test_aggregate_stats(self):
+        stats = aggregate_peer_stats(self.peers)
+        # since all peers identical, min=max=avg=median=expected
+        self.assertEqual(stats["ev_sales"]["LTM"]["min"], 10.0)
+        self.assertEqual(stats["ev_sales"]["LTM"]["max"], 10.0)
+        self.assertEqual(stats["ev_sales"]["LTM"]["avg"], 10.0)
+        self.assertEqual(stats["ev_sales"]["LTM"]["median"], 10.0)
 
-        self.assertAlmostEqual(ranges["per"]["min"], 10000.0)
-        self.assertAlmostEqual(ranges["per"]["max"], 10000.0)
-        self.assertAlmostEqual(ranges["per"]["avg"], 10000.0)
-
-        self.assertAlmostEqual(ranges["pbr"]["avg"], 12000.0)
-        self.assertAlmostEqual(ranges["ev_ebitda"]["avg"], 9500.0)
-        self.assertAlmostEqual(ranges["ev_ebit"]["avg"], 8250.0)
-
-    def test_zero_division_handling_in_metrics(self):
-        bad_peer = {
-            "market_cap": 1000.0,
-            "net_income": 0.0,
-            "net_assets": 0.0,
-            "operating_income": 0.0,
-            "depreciation": 0.0,
-            "sub_debt": 0.0,
-            "cash": 0.0,
-            "sales": 0.0,
-        }
-        metrics = calculate_metrics(bad_peer)
-        self.assertIsNone(metrics["per"])
-        self.assertIsNone(metrics["pbr"])
-        self.assertIsNone(metrics["ev_sales"])
-        self.assertIsNone(metrics["ev_ebitda"])
-        self.assertIsNone(metrics["ev_ebit"])
-
-    def test_negative_values_are_rejected(self):
-        bad_company = {
-            "market_cap": 1000.0,
-            "net_income": -1.0,
-            "net_assets": 10.0,
-            "operating_income": 10.0,
-            "depreciation": 10.0,
-            "sub_debt": 0.0,
-            "cash": 0.0,
-            "sales": 0.0,
-        }
-        with self.assertRaises(ValueError):
-            calculate_metrics(bad_company)
-
-    def test_dcf_valuation_success(self):
-        result = calculate_dcf_valuation(
-            self.target,
-            forecast_years=5,
-            growth_rate_pct=5.0,
-            discount_rate_pct=7.0,
-            terminal_growth_rate_pct=1.0,
-        )
-
-        base_fcf = 1000.0
-        growth = 0.05
-        discount = 0.07
-        terminal_growth = 0.01
-
-        expected_forecast = []
-        for year in range(1, 6):
-            fcf = base_fcf * ((1 + growth) ** year)
-            pv = fcf / ((1 + discount) ** year)
-            expected_forecast.append((fcf, pv))
-
-        expected_pv_fcf_total = sum(pv for _, pv in expected_forecast)
-        terminal_fcf = base_fcf * ((1 + growth) ** 5)
-        terminal_value = terminal_fcf * (1 + terminal_growth) / (discount - terminal_growth)
-        expected_pv_terminal_value = terminal_value / ((1 + discount) ** 5)
-        expected_enterprise_value = expected_pv_fcf_total + expected_pv_terminal_value
-        expected_equity_value = expected_enterprise_value + self.target["cash"] - self.target["sub_debt"]
-
-        self.assertEqual(result["forecast_years"], 5)
-        self.assertAlmostEqual(result["base_fcf"], base_fcf)
-        self.assertAlmostEqual(result["pv_fcf_total"], expected_pv_fcf_total)
-        self.assertAlmostEqual(result["terminal_value"], terminal_value)
-        self.assertAlmostEqual(result["pv_terminal_value"], expected_pv_terminal_value)
-        self.assertAlmostEqual(result["enterprise_value"], expected_enterprise_value)
-        self.assertAlmostEqual(result["equity_value"], expected_equity_value)
-
-        self.assertEqual(len(result["forecast_rows"]), 5)
-        self.assertAlmostEqual(result["forecast_rows"][0]["fcf"], expected_forecast[0][0])
-        self.assertAlmostEqual(result["forecast_rows"][-1]["present_value"], expected_forecast[-1][1])
-
-    def test_dcf_invalid_discount_rate(self):
-        with self.assertRaises(ValueError):
-            calculate_dcf_valuation(
-                self.target,
-                forecast_years=5,
-                growth_rate_pct=2.0,
-                discount_rate_pct=1.0,
-                terminal_growth_rate_pct=1.0,
-            )
-
-    def test_dcf_negative_values_are_rejected(self):
-        bad_target = dict(self.target)
-        bad_target["operating_income"] = -1.0
-        with self.assertRaises(ValueError):
-            calculate_dcf_valuation(
-                bad_target,
-                forecast_years=5,
-                growth_rate_pct=2.0,
-                discount_rate_pct=7.0,
-                terminal_growth_rate_pct=1.0,
-            )
+    def test_apply_multiples_to_target_exact(self):
+        stats = aggregate_peer_stats(self.peers)
+        # Apply median multiples to target
+        result = apply_multiples_to_target(self.target, stats, method="median")
+        # For EV/Sales LTM: multiple 10, target sales 200 -> implied EV=2000
+        item = result["by_metric"]["ev_sales"]["LTM"]
+        self.assertEqual(item["multiple"], 10.0)
+        self.assertEqual(item["denom"], 200.0)
+        self.assertEqual(item["implied_ev"], 2000.0)
+        # implied equity = implied_ev - sub_debt - minority + cash = 2000
+        self.assertEqual(item["implied_equity"], 2000.0)
+        # implied price = equity / shares_outstanding = 2000 / 100 = 20.0
+        self.assertEqual(item["implied_price"], 20.0)
 
 
 if __name__ == "__main__":

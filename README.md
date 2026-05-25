@@ -22,6 +22,18 @@ pip install -r requirements.txt  # または pip install streamlit pytest
 streamlit run app.py
 ```
 
+## CSV一括読み込みテンプレート
+
+所定フォーマットのCSVを使って Target（1行目）と複数のComps（以降最大15行）を一括読み込みできます。サンプルテンプレートを同梱しています:
+
+- [comps_template.csv](comps_template.csv)
+
+ヘッダーは次の列（順序・名称を厳守）です:
+
+company_name, market_cap, shares_outstanding, cash, sub_debt, minority, sales_ltm, sales_cy1, sales_cy2, ebitda_ltm, ebitda_cy1, ebitda_cy2, ebit_ltm, ebit_cy1, ebit_cy2, net_income_ltm, net_income_cy1, net_income_cy2
+
+1行目がTarget、2行目以降がCompsです。空欄は0として扱われます。
+
 入力専用ページを使う場合:
 
 ```bash

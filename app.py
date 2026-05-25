@@ -1,185 +1,54 @@
-"""Streamlit app for global large-cap corporate valuation.
+"""Professional Comps-style Valuation Streamlit App
 
-This module keeps the valuation logic testable and separates the Streamlit UI
-from the calculation helpers used by the unit tests.
+This module provides a Streamlit UI for entering TargetCo and up to 15 Comps,
+parsing CSV uploads, computing multiples (EV/Sales, EV/EBITDA, EV/EBIT, P/E)
+for LTM/CY+1/CY+2, aggregating statistics (Min/Max/Average/Median), and
+applying median/average multiples to the TargetCo to produce implied EV,
+equity value, and implied share price.
+
+All calculation functions are pure and testable without Streamlit.
+UI uses only st.metric, st.dataframe and basic input widgets so it runs in
+minimal environments.
 """
 
 from __future__ import annotations
 
 import csv
 import io
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Tuple
+import statistics
 
 st: Any
 try:
-    import streamlit as _streamlit
-except ModuleNotFoundError:
+    import streamlit as _st
+except Exception:
     st = None
 else:
-    st = _streamlit
-
-APP_TITLE = "グローバル大手企業特化型・企業価値評価ツール"
-APP_DESCRIPTION = (
-    "手入力ベースで、類似企業比較法とDCF法を一画面で実行できる企業価値評価ダッシュボードです。"
-)
-PEER_COUNT = 5
-DEFAULT_FORECAST_YEARS = 5
-
-KEY_MAP = {
-    "売上高": "sales",
-    "sales": "sales",
-    "revenue": "sales",
-    "net_sales": "sales",
-    "営業利益": "operating_income",
-    "operating_income": "operating_income",
-    "operating profit": "operating_income",
-    "純利益": "net_income",
-    "当期純利益": "net_income",
-    "net_income": "net_income",
-    "profit": "net_income",
-    "時価総額": "market_cap",
-    "market_cap": "market_cap",
-    "market capitalization": "market_cap",
-    "純資産": "net_assets",
-    "自己資本": "net_assets",
-    "net_assets": "net_assets",
-    "total_equity": "net_assets",
-    "減価償却費": "depreciation",
-    "減価償却": "depreciation",
-    "depreciation": "depreciation",
-    "有利子負債": "sub_debt",
-    "有利子": "sub_debt",
-    "interest_bearing_debt": "sub_debt",
-    "sub_debt": "sub_debt",
-    "現預金": "cash",
-    "現金及び現金同等物": "cash",
-    "cash": "cash",
-    "cash_and_equivalents": "cash",
-}
-
-NEEDED_KEYS = {
-    "market_cap",
-    "sales",
-    "net_income",
-    "net_assets",
-    "operating_income",
-    "depreciation",
-    "sub_debt",
-    "cash",
-}
-
-DISPLAY_METHOD_ORDER = ["per", "pbr", "ev_ebitda", "ev_ebit"]
-DISPLAY_METHOD_LABELS = {
-    "per": "PER",
-    "pbr": "PBR",
-    "ev_ebitda": "EV/EBITDA",
-    "ev_ebit": "EV/EBIT",
-    "ev_sales": "EV/Sales",
-}
+    st = _st
 
 
-def normalize_key(key: str) -> Optional[str]:
-    if not key:
-        return None
-    raw_key = key.strip()
-    lower_key = raw_key.lower()
-    if raw_key in KEY_MAP:
-        return KEY_MAP[raw_key]
-    for original, mapped in KEY_MAP.items():
-        if original.lower() == lower_key:
-            return mapped
-    normalized = lower_key.replace(" ", "").replace("（連結）", "").replace("(連結)", "")
-    for original, mapped in KEY_MAP.items():
-        if original.lower().replace(" ", "") == normalized:
-            return mapped
-    return None
+PERIODS = ["LTM", "CY+1", "CY+2"]
 
 
-def parse_number(value: Any) -> float:
-    if value is None:
-        return 0.0
-    if isinstance(value, (int, float)):
-        return float(value)
-    text = str(value).strip()
-    if text == "":
-        return 0.0
-    text = text.replace(",", "")
-    if text.startswith("(") and text.endswith(")"):
-        try:
-            return -float(text[1:-1])
-        except Exception:
-            return 0.0
+def compute_ev(company: Dict[str, float]) -> float:
+    """Compute EV = market_cap + sub_debt + minority - cash"""
+    market_cap = float(company.get("market_cap", 0.0))
+    sub_debt = float(company.get("sub_debt", 0.0))
+    minority = float(company.get("minority", 0.0))
+    cash = float(company.get("cash", 0.0))
+    return market_cap + sub_debt + minority - cash
+
+
+def safe_div(n: float, d: float) -> Optional[float]:
     try:
-        return float(text)
+        if d == 0:
+            return None
+        # treat negative denominators as invalid for multiples
+        if d <= 0:
+            return None
+        return n / d
     except Exception:
-        return 0.0
-
-
-def _empty_company() -> Dict[str, float]:
-    company = {key: 0.0 for key in NEEDED_KEYS}
-    return company
-
-
-def _finalize_companies(companies: Sequence[Dict[str, float]]) -> Sequence[Dict[str, float]]:
-    for company in companies:
-        for key in NEEDED_KEYS:
-            company.setdefault(key, 0.0)
-    return companies
-
-
-def parse_statement_style_csv(reader: csv.DictReader) -> tuple[Dict[str, float], List[Dict[str, float]]]:
-    """Parse row-oriented financial statement CSV data.
-
-    The first column is treated as the item label and the remaining columns as
-    company values.
-    """
-
-    fieldnames = reader.fieldnames or []
-    if len(fieldnames) < 2:
-        return {}, []
-
-    label_field = fieldnames[0]
-    company_fields = fieldnames[1:]
-    companies: List[Dict[str, float]] = [dict() for _ in company_fields]
-
-    for row in reader:
-        label = str(row.get(label_field, "")).strip()
-        mapped_key = normalize_key(label)
-        if mapped_key is None:
-            continue
-        for index, company_field in enumerate(company_fields):
-            companies[index][mapped_key] = parse_number(row.get(company_field))
-
-    _finalize_companies(companies)
-    target = companies[0] if companies else {}
-    peers = list(companies[1 : 1 + PEER_COUNT])
-    return target, peers
-
-
-def parse_pasted_statement(text: str) -> tuple[Dict[str, float], List[Dict[str, float]]]:
-    """Parse pasted CSV-like statement data in row-oriented form."""
-
-    reader = csv.reader(io.StringIO(text))
-    rows = [row for row in reader if any(cell.strip() for cell in row)]
-    if not rows:
-        return {}, []
-
-    max_cols = max(len(row) for row in rows) - 1
-    companies: List[Dict[str, float]] = [dict() for _ in range(max_cols)]
-
-    for row in rows:
-        label = row[0].strip()
-        mapped_key = normalize_key(label)
-        if mapped_key is None:
-            continue
-        for index in range(max_cols):
-            value = row[index + 1].strip() if index + 1 < len(row) else ""
-            companies[index][mapped_key] = parse_number(value)
-
-    _finalize_companies(companies)
-    target = companies[0] if companies else {}
-    peers = list(companies[1 : 1 + PEER_COUNT])
-    return target, peers
+        return None
 
 
 def validate_non_negative(label: str, value: float) -> None:
@@ -187,8 +56,13 @@ def validate_non_negative(label: str, value: float) -> None:
         raise ValueError(f"{label}は0以上の値を入力してください。")
 
 
-def validate_company_input(company: Dict[str, float], *, include_sales: bool = True) -> None:
-    keys = [
+def calculate_metrics(company: Dict[str, float]) -> Dict[str, Optional[float]]:
+    """Compatibility helper: compute common multiples for a simplified company dict.
+
+    Returns keys: per, pbr, ev_sales, ev_ebitda, ev_ebit
+    """
+    # Validate a subset of fields
+    keys_to_check = [
         ("時価総額", company.get("market_cap", 0.0)),
         ("純利益", company.get("net_income", 0.0)),
         ("純資産", company.get("net_assets", 0.0)),
@@ -197,26 +71,17 @@ def validate_company_input(company: Dict[str, float], *, include_sales: bool = T
         ("有利子負債", company.get("sub_debt", 0.0)),
         ("現預金", company.get("cash", 0.0)),
     ]
-    if include_sales:
-        keys.insert(1, ("売上高", company.get("sales", 0.0)))
+    for label, v in keys_to_check:
+        validate_non_negative(label, float(v))
 
-    for label, value in keys:
-        validate_non_negative(label, value)
-
-
-def calculate_metrics(company: Dict[str, float]) -> Dict[str, Optional[float]]:
-    """Calculate the core valuation multiples for one company."""
-
-    validate_company_input(company)
-
-    market_cap = company.get("market_cap", 0.0)
-    sales = company.get("sales", 0.0)
-    net_income = company.get("net_income", 0.0)
-    net_assets = company.get("net_assets", 0.0)
-    operating_income = company.get("operating_income", 0.0)
-    depreciation = company.get("depreciation", 0.0)
-    sub_debt = company.get("sub_debt", 0.0)
-    cash = company.get("cash", 0.0)
+    market_cap = float(company.get("market_cap", 0.0))
+    sales = float(company.get("sales", 0.0))
+    net_income = float(company.get("net_income", 0.0))
+    net_assets = float(company.get("net_assets", 0.0))
+    operating_income = float(company.get("operating_income", 0.0))
+    depreciation = float(company.get("depreciation", 0.0))
+    sub_debt = float(company.get("sub_debt", 0.0))
+    cash = float(company.get("cash", 0.0))
 
     enterprise_value = market_cap + sub_debt - cash
     ebitda = operating_income + depreciation
@@ -255,11 +120,16 @@ def _apply_multiple(
 
 
 def compute_valuation_range(target: Dict[str, float], peers: List[Dict[str, float]]) -> Dict[str, Dict[str, Any]]:
-    """Apply peer multiples to the target company and summarize each method."""
+    """Apply peer multiples to the target company and summarize each method.
 
-    validate_company_input(target)
+    Returns a dict keyed by method with 'values', 'min', 'max', 'avg'
+    where 'values' are the applied equity values (multiple applied to target denominator
+    and adjusted for net debt where applicable).
+    """
+    # Basic validations (non-negative)
+    validate_non_negative("時価総額", float(target.get("market_cap", 0.0)))
     for peer in peers:
-        validate_company_input(peer)
+        validate_non_negative("時価総額(peer)", float(peer.get("market_cap", 0.0)))
 
     peer_metrics = [calculate_metrics(peer) for peer in peers]
     methods = ["per", "pbr", "ev_sales", "ev_ebitda", "ev_ebit"]
@@ -281,386 +151,398 @@ def compute_valuation_range(target: Dict[str, float], peers: List[Dict[str, floa
     return ranges
 
 
-def calculate_dcf_valuation(
-    target: Dict[str, float],
-    forecast_years: int,
-    growth_rate_pct: float,
-    discount_rate_pct: float,
-    terminal_growth_rate_pct: float,
-) -> Dict[str, Any]:
-    """Calculate a simple DCF valuation from manually entered assumptions."""
+def compute_multiples_for_company(company: Dict[str, Any]) -> Dict[str, Dict[str, Optional[float]]]:
+    """Return multiples per metric per period.
 
-    validate_company_input(target, include_sales=True)
-    if forecast_years < 5 or forecast_years > 10:
-        raise ValueError("予測期間は5年から10年の範囲で入力してください。")
+    Returns a dict: {metric: {period: value_or_None}}
+    Metrics: ev_sales, ev_ebitda, ev_ebit, pe
+    """
+    ev = compute_ev(company)
 
-    discount_rate = discount_rate_pct / 100.0
-    terminal_growth_rate = terminal_growth_rate_pct / 100.0
-    growth_rate = growth_rate_pct / 100.0
-
-    if discount_rate <= terminal_growth_rate:
-        raise ValueError("割引率は永久成長率より大きく設定してください。")
-    if discount_rate <= -1.0:
-        raise ValueError("割引率は-100%より大きい値を入力してください。")
-    if terminal_growth_rate <= -1.0:
-        raise ValueError("永久成長率は-100%より大きい値を入力してください。")
-
-    base_fcf = target.get("operating_income", 0.0) + target.get("depreciation", 0.0)
-    forecast_rows: List[Dict[str, float]] = []
-    pv_total = 0.0
-
-    for year in range(1, forecast_years + 1):
-        fcf = base_fcf * ((1.0 + growth_rate) ** year)
-        present_value = fcf / ((1.0 + discount_rate) ** year)
-        pv_total += present_value
-        forecast_rows.append(
-            {
-                "year": float(year),
-                "fcf": fcf,
-                "discount_factor": 1.0 / ((1.0 + discount_rate) ** year),
-                "present_value": present_value,
-            }
-        )
-
-    terminal_fcf = base_fcf * ((1.0 + growth_rate) ** forecast_years)
-    terminal_value = terminal_fcf * (1.0 + terminal_growth_rate) / (discount_rate - terminal_growth_rate)
-    pv_terminal_value = terminal_value / ((1.0 + discount_rate) ** forecast_years)
-    enterprise_value = pv_total + pv_terminal_value
-    equity_value = enterprise_value + target.get("cash", 0.0) - target.get("sub_debt", 0.0)
-
-    return {
-        "base_fcf": base_fcf,
-        "forecast_years": forecast_years,
-        "growth_rate_pct": growth_rate_pct,
-        "discount_rate_pct": discount_rate_pct,
-        "terminal_growth_rate_pct": terminal_growth_rate_pct,
-        "forecast_rows": forecast_rows,
-        "pv_fcf_total": pv_total,
-        "terminal_fcf": terminal_fcf,
-        "terminal_value": terminal_value,
-        "pv_terminal_value": pv_terminal_value,
-        "enterprise_value": enterprise_value,
-        "equity_value": equity_value,
-        "net_debt": target.get("sub_debt", 0.0) - target.get("cash", 0.0),
+    # Gather denominators
+    sales = {
+        "LTM": float(company.get("sales_ltm", 0.0)),
+        "CY+1": float(company.get("sales_cy1", 0.0)),
+        "CY+2": float(company.get("sales_cy2", 0.0)),
+    }
+    ebitda = {
+        "LTM": float(company.get("ebitda_ltm", 0.0)),
+        "CY+1": float(company.get("ebitda_cy1", 0.0)),
+        "CY+2": float(company.get("ebitda_cy2", 0.0)),
+    }
+    ebit = {
+        "LTM": float(company.get("ebit_ltm", 0.0)),
+        "CY+1": float(company.get("ebit_cy1", 0.0)),
+        "CY+2": float(company.get("ebit_cy2", 0.0)),
+    }
+    net_income = {
+        "LTM": float(company.get("net_income_ltm", 0.0)),
+        "CY+1": float(company.get("net_income_cy1", 0.0)),
+        "CY+2": float(company.get("net_income_cy2", 0.0)),
     }
 
-
-def _format_amount(value: float) -> str:
-    return f"{value:,.0f}"
-
-
-def _metric_value(value: Optional[float]) -> str:
-    if value is None:
-        return "算定不可"
-    return _format_amount(value)
-
-
-def _method_summary_rows(ranges: Dict[str, Dict[str, Any]], methods: Sequence[str]) -> List[Dict[str, Any]]:
-    rows: List[Dict[str, Any]] = []
-    for method in methods:
-        stats = ranges.get(method)
-        rows.append(
-            {
-                "手法": DISPLAY_METHOD_LABELS[method],
-                "Min": None if stats is None else stats["min"],
-                "Max": None if stats is None else stats["max"],
-                "平均値": None if stats is None else stats["avg"],
-            }
-        )
-    return rows
-
-
-def _render_company_inputs(
-    title: str,
-    prefix: str,
-    defaults: Dict[str, float],
-    *,
-    show_market_cap: bool,
-) -> Dict[str, float]:
-    st.subheader(title)
-    col1, col2, col3, col4 = st.columns(4)
-
-    with col1:
-        market_cap = st.number_input(
-            "時価総額",
-            min_value=0.0,
-            value=float(defaults.get("market_cap", 0.0)),
-            step=1000.0,
-            key=f"{prefix}_market_cap",
-            disabled=not show_market_cap,
-        )
-        net_income = st.number_input(
-            "純利益",
-            min_value=0.0,
-            value=float(defaults.get("net_income", 0.0)),
-            step=100.0,
-            key=f"{prefix}_net_income",
-        )
-
-    with col2:
-        net_assets = st.number_input(
-            "純資産",
-            min_value=0.0,
-            value=float(defaults.get("net_assets", 0.0)),
-            step=1000.0,
-            key=f"{prefix}_net_assets",
-        )
-        operating_income = st.number_input(
-            "営業利益",
-            min_value=0.0,
-            value=float(defaults.get("operating_income", 0.0)),
-            step=100.0,
-            key=f"{prefix}_operating_income",
-        )
-
-    with col3:
-        depreciation = st.number_input(
-            "減価償却費",
-            min_value=0.0,
-            value=float(defaults.get("depreciation", 0.0)),
-            step=100.0,
-            key=f"{prefix}_depreciation",
-        )
-        sub_debt = st.number_input(
-            "有利子負債",
-            min_value=0.0,
-            value=float(defaults.get("sub_debt", 0.0)),
-            step=1000.0,
-            key=f"{prefix}_sub_debt",
-        )
-
-    with col4:
-        cash = st.number_input(
-            "現預金",
-            min_value=0.0,
-            value=float(defaults.get("cash", 0.0)),
-            step=1000.0,
-            key=f"{prefix}_cash",
-        )
-
-    company = {
-        "market_cap": float(market_cap),
-        "sales": float(defaults.get("sales", 0.0)),
-        "net_income": float(net_income),
-        "net_assets": float(net_assets),
-        "operating_income": float(operating_income),
-        "depreciation": float(depreciation),
-        "sub_debt": float(sub_debt),
-        "cash": float(cash),
-    }
-    if not show_market_cap:
-        company["market_cap"] = float(defaults.get("market_cap", 0.0))
-    return company
-
-
-def _render_input_tab() -> None:
-    st.header("データ入力ページ")
-    st.write("評価対象企業と類似企業5社の財務データを入力してください。売上高は入力不要です。")
-
-    default_target = st.session_state.get(
-        "default_target",
-        {
-            "market_cap": 250000.0,
-            "net_income": 12000.0,
-            "net_assets": 180000.0,
-            "operating_income": 15000.0,
-            "depreciation": 5000.0,
-            "sub_debt": 40000.0,
-            "cash": 30000.0,
-            "sales": 0.0,
-        },
-    )
-    default_peers = st.session_state.get(
-        "default_peers",
-        [
-            {
-                "market_cap": 300000.0 + 10000.0 * index,
-                "net_income": 10000.0 + 500.0 * index,
-                "net_assets": 160000.0 + 5000.0 * index,
-                "operating_income": 14000.0 + 400.0 * index,
-                "depreciation": 4500.0 + 100.0 * index,
-                "sub_debt": 35000.0 + 1000.0 * index,
-                "cash": 25000.0 + 800.0 * index,
-                "sales": 0.0,
-            }
-            for index in range(PEER_COUNT)
-        ],
-    )
-
-    target = _render_company_inputs("評価対象企業", "target", default_target, show_market_cap=True)
-    peers: List[Dict[str, float]] = []
-    st.subheader("類似企業 5社")
-    for index in range(PEER_COUNT):
-        peer_defaults = default_peers[index] if index < len(default_peers) else _empty_company()
-        with st.expander(f"類似企業 {index + 1}", expanded=index == 0):
-            peer = _render_company_inputs(
-                f"類似企業 {index + 1}",
-                f"peer_{index + 1}",
-                peer_defaults,
-                show_market_cap=True,
-            )
-            peers.append(peer)
-
-    st.session_state["current_target"] = target
-    st.session_state["current_peers"] = peers
-
-
-def _render_assumption_tab() -> None:
-    st.header("前提入力ページ")
-    st.write("DCF法に使う予測期間、成長率、割引率、永久成長率を設定してください。")
-
-    default_assumptions = st.session_state.get(
-        "default_assumptions",
-        {
-            "forecast_years": DEFAULT_FORECAST_YEARS,
-            "growth_rate_pct": 4.0,
-            "discount_rate_pct": 7.0,
-            "terminal_growth_rate_pct": 1.0,
-        },
-    )
-
-    col1, col2 = st.columns(2)
-    with col1:
-        forecast_years = st.slider(
-            "予測期間",
-            min_value=5,
-            max_value=10,
-            value=int(default_assumptions.get("forecast_years", DEFAULT_FORECAST_YEARS)),
-            step=1,
-            key="forecast_years",
-        )
-        growth_rate_pct = st.number_input(
-            "年間FCF成長率（%）",
-            value=float(default_assumptions.get("growth_rate_pct", 4.0)),
-            step=0.1,
-            format="%.1f",
-            key="growth_rate_pct",
-        )
-    with col2:
-        discount_rate_pct = st.number_input(
-            "割引率（WACC相当、%）",
-            value=float(default_assumptions.get("discount_rate_pct", 7.0)),
-            step=0.1,
-            format="%.1f",
-            key="discount_rate_pct",
-        )
-        terminal_growth_rate_pct = st.number_input(
-            "永久成長率（%）",
-            value=float(default_assumptions.get("terminal_growth_rate_pct", 1.0)),
-            step=0.1,
-            format="%.1f",
-            key="terminal_growth_rate_pct",
-        )
-
-    st.session_state["current_assumptions"] = {
-        "forecast_years": int(forecast_years),
-        "growth_rate_pct": float(growth_rate_pct),
-        "discount_rate_pct": float(discount_rate_pct),
-        "terminal_growth_rate_pct": float(terminal_growth_rate_pct),
+    multiples: Dict[str, Dict[str, Optional[float]]] = {
+        "ev_sales": {},
+        "ev_ebitda": {},
+        "ev_ebit": {},
+        "pe": {},
     }
 
+    for p in PERIODS:
+        multiples["ev_sales"][p] = safe_div(ev, sales[p])
+        multiples["ev_ebitda"][p] = safe_div(ev, ebitda[p])
+        multiples["ev_ebit"][p] = safe_div(ev, ebit[p])
+        # P/E uses market_cap / net_income
+        market_cap = float(company.get("market_cap", 0.0))
+        multiples["pe"][p] = safe_div(market_cap, net_income[p])
 
-def _render_comps_results(ranges: Dict[str, Dict[str, Any]]) -> None:
-    st.subheader("類似企業比較法の結果")
-    rows = _method_summary_rows(ranges, DISPLAY_METHOD_ORDER)
-    st.dataframe(rows, use_container_width=True, hide_index=True)
-
-    for method in DISPLAY_METHOD_ORDER:
-        stats = ranges.get(method)
-        with st.container():
-            st.markdown(f"#### {DISPLAY_METHOD_LABELS[method]}")
-            col_min, col_max, col_avg = st.columns(3)
-            with col_min:
-                st.metric("Min", _metric_value(None if stats is None else stats["min"]))
-            with col_max:
-                st.metric("Max", _metric_value(None if stats is None else stats["max"]))
-            with col_avg:
-                st.metric("平均値", _metric_value(None if stats is None else stats["avg"]))
+    return multiples
 
 
-def _render_dcf_results(dcf_result: Dict[str, Any]) -> None:
-    st.subheader("DCF法の結果")
-    st.metric("DCFによる推定株式価値", _format_amount(float(dcf_result["equity_value"])))
+def aggregate_peer_stats(peers: List[Dict[str, Any]]) -> Dict[str, Dict[str, Dict[str, Optional[float]]]]:
+    """Aggregate min/max/avg/median for each metric and period across peers.
 
-    forecast_rows = dcf_result.get("forecast_rows", [])
-    if forecast_rows:
-        st.write("予測FCFの現在価値化")
-        st.dataframe(forecast_rows, use_container_width=True, hide_index=True)
+    Returns: {metric: {period: {min,max,avg,median}}}
+    """
+    # collect multiples per metric/period
+    collected: Dict[str, Dict[str, List[float]]] = {
+        "ev_sales": {p: [] for p in PERIODS},
+        "ev_ebitda": {p: [] for p in PERIODS},
+        "ev_ebit": {p: [] for p in PERIODS},
+        "pe": {p: [] for p in PERIODS},
+    }
 
-    summary_rows = [
-        {"項目": "直近FCF", "値": dcf_result["base_fcf"]},
-        {"項目": "割引後FCF合計", "値": dcf_result["pv_fcf_total"]},
-        {"項目": "ターミナルバリュー", "値": dcf_result["terminal_value"]},
-        {"項目": "割引後TV", "値": dcf_result["pv_terminal_value"]},
-        {"項目": "事業価値（EV）", "値": dcf_result["enterprise_value"]},
-        {"項目": "ネットデット", "値": dcf_result["net_debt"]},
-    ]
-    st.dataframe(summary_rows, use_container_width=True, hide_index=True)
+    for peer in peers:
+        m = compute_multiples_for_company(peer)
+        for metric in collected:
+            for p in PERIODS:
+                val = m.get(metric, {}).get(p)
+                if val is not None:
+                    collected[metric][p].append(val)
+
+    stats: Dict[str, Dict[str, Dict[str, Optional[float]]]] = {}
+    for metric, per_dict in collected.items():
+        stats[metric] = {}
+        for p, values in per_dict.items():
+            if not values:
+                stats[metric][p] = {"min": None, "max": None, "avg": None, "median": None}
+            else:
+                stats[metric][p] = {
+                    "min": min(values),
+                    "max": max(values),
+                    "avg": statistics.mean(values),
+                    "median": statistics.median(values),
+                }
+    return stats
 
 
-def _render_result_tab() -> None:
-    st.header("評価結果ページ")
-    st.write("計算実行ボタンを押すと、類似企業比較法とDCF法の結果を表示します。")
+def apply_multiples_to_target(target: Dict[str, Any], stats: Dict[str, Dict[str, Dict[str, Optional[float]]]], method: str = "median") -> Dict[str, Any]:
+    """Apply chosen method ('median' or 'avg') to compute implied EV and equity for target.
 
-    compute_clicked = st.button("計算実行", type="primary")
-    if compute_clicked:
-        target = st.session_state.get("current_target")
-        peers = st.session_state.get("current_peers")
-        assumptions = st.session_state.get("current_assumptions")
+    For each metric and period, compute:
+      implied_ev = multiple * target_metric
+      implied_equity = implied_ev - sub_debt - minority + cash
+      implied_price = implied_equity / shares_outstanding (if shares>0)
+    """
+    result: Dict[str, Any] = {"by_metric": {}}
+    for metric in ["ev_sales", "ev_ebitda", "ev_ebit", "pe"]:
+        result["by_metric"][metric] = {}
+        for p in PERIODS:
+            multiple = stats.get(metric, {}).get(p, {}).get(method if method != "avg" else "avg")
+            # allow method 'average' alias
+            if method == "average":
+                multiple = stats.get(metric, {}).get(p, {}).get("avg")
+            if multiple is None:
+                result["by_metric"][metric][p] = {"multiple": None, "implied_ev": None, "implied_equity": None, "implied_price": None}
+                continue
 
-        if not target or not peers or not assumptions:
-            st.error("まずデータ入力ページと前提入力ページを設定してください。")
-            return
+            # select target denominator
+            denom_map = {
+                "ev_sales": f"sales_{p.lower().replace('+','_plus')}",
+            }
+            # map period keys
+            denom_value = None
+            if metric == "ev_sales":
+                key = {"LTM": "sales_ltm", "CY+1": "sales_cy1", "CY+2": "sales_cy2"}[p]
+                denom_value = float(target.get(key, 0.0))
+            elif metric == "ev_ebitda":
+                key = {"LTM": "ebitda_ltm", "CY+1": "ebitda_cy1", "CY+2": "ebitda_cy2"}[p]
+                denom_value = float(target.get(key, 0.0))
+            elif metric == "ev_ebit":
+                key = {"LTM": "ebit_ltm", "CY+1": "ebit_cy1", "CY+2": "ebit_cy2"}[p]
+                denom_value = float(target.get(key, 0.0))
+            elif metric == "pe":
+                key = {"LTM": "net_income_ltm", "CY+1": "net_income_cy1", "CY+2": "net_income_cy2"}[p]
+                denom_value = float(target.get(key, 0.0))
 
-        try:
-            ranges = compute_valuation_range(target, peers)
-            dcf_result = calculate_dcf_valuation(
-                target,
-                forecast_years=int(assumptions["forecast_years"]),
-                growth_rate_pct=float(assumptions["growth_rate_pct"]),
-                discount_rate_pct=float(assumptions["discount_rate_pct"]),
-                terminal_growth_rate_pct=float(assumptions["terminal_growth_rate_pct"]),
-            )
-        except Exception as exc:
-            st.error(f"エラーが発生しました: {exc}")
-            return
+            if denom_value <= 0:
+                implied_ev = None
+                implied_equity = None
+                implied_price = None
+            else:
+                implied_ev = multiple * denom_value
+                implied_equity = implied_ev - float(target.get("sub_debt", 0.0)) - float(target.get("minority", 0.0)) + float(target.get("cash", 0.0))
+                shares = float(target.get("shares_outstanding", 0.0))
+                implied_price = None if shares <= 0 else implied_equity / shares
 
-        st.session_state["last_result"] = {
-            "ranges": ranges,
-            "dcf_result": dcf_result,
+            result["by_metric"][metric][p] = {
+                "multiple": multiple,
+                "denom": denom_value,
+                "implied_ev": implied_ev,
+                "implied_equity": implied_equity,
+                "implied_price": implied_price,
+            }
+
+    return result
+
+
+def parse_csv_upload(uploaded_file: io.BytesIO) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """Parse CSV uploaded in expected format.
+
+    Expected header columns (company-level):
+    company_name, market_cap, shares_outstanding, cash, sub_debt, minority,
+    sales_ltm, sales_cy1, sales_cy2,
+    ebitda_ltm, ebitda_cy1, ebitda_cy2,
+    ebit_ltm, ebit_cy1, ebit_cy2,
+    net_income_ltm, net_income_cy1, net_income_cy2
+
+    First row is TargetCo; subsequent rows (up to 15) are peers.
+    """
+    text = uploaded_file.read().decode("utf-8")
+    reader = csv.DictReader(io.StringIO(text))
+    rows = [r for r in reader]
+    if not rows:
+        raise ValueError("CSVに有効な行が含まれていません。")
+
+    def _normalize_row(r: Dict[str, str]) -> Dict[str, Any]:
+        def f(k: str) -> float:
+            v = r.get(k, "")
+            try:
+                return float(v) if v != "" else 0.0
+            except Exception:
+                return 0.0
+
+        return {
+            "company_name": r.get("company_name", ""),
+            "market_cap": f("market_cap"),
+            "shares_outstanding": f("shares_outstanding"),
+            "cash": f("cash"),
+            "sub_debt": f("sub_debt"),
+            "minority": f("minority"),
+            "sales_ltm": f("sales_ltm"),
+            "sales_cy1": f("sales_cy1"),
+            "sales_cy2": f("sales_cy2"),
+            "ebitda_ltm": f("ebitda_ltm"),
+            "ebitda_cy1": f("ebitda_cy1"),
+            "ebitda_cy2": f("ebitda_cy2"),
+            "ebit_ltm": f("ebit_ltm"),
+            "ebit_cy1": f("ebit_cy1"),
+            "ebit_cy2": f("ebit_cy2"),
+            "net_income_ltm": f("net_income_ltm"),
+            "net_income_cy1": f("net_income_cy1"),
+            "net_income_cy2": f("net_income_cy2"),
         }
 
-    last_result = st.session_state.get("last_result")
-    if not last_result:
-        st.info("まだ計算結果がありません。各ページを入力してから計算実行を押してください。")
-        return
-
-    # 結果を2つに分離して表示：Comps（類似企業比較）とDCF
-    result_tabs = st.tabs(["類似企業比較（Comps）", "DCF法"])
-    with result_tabs[0]:
-        _render_comps_results(last_result["ranges"])
-    with result_tabs[1]:
-        _render_dcf_results(last_result["dcf_result"])
+    normalized = [_normalize_row(r) for r in rows]
+    target = normalized[0]
+    peers = normalized[1:16]
+    return target, peers
 
 
-def render_app() -> None:
-    st.set_page_config(page_title=APP_TITLE, layout="wide")
-    st.title(APP_TITLE)
-    st.write(APP_DESCRIPTION)
+def _render_ui() -> None:
+    st.set_page_config(page_title="Comps Valuation", layout="wide")
+    st.title("Comps形式バリュエーション（プロ仕様）")
 
-    tabs = st.tabs(["データ入力ページ", "前提入力ページ", "評価結果ページ"])
-    with tabs[0]:
-        _render_input_tab()
-    with tabs[1]:
-        _render_assumption_tab()
-    with tabs[2]:
-        _render_result_tab()
+    st.markdown("入力は手動または所定フォーマットのCSVで一括読み込みできます。CSVの見本はREADMEを参照してください。")
+
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        uploaded = st.file_uploader("所定フォーマットCSVをアップロード（1行目=Target、その後がComps）", type=["csv"])
+    with col2:
+        method = st.selectbox("適用するマルチプル", ["median", "average"], index=0)
+
+    if uploaded is not None:
+        try:
+            target, peers = parse_csv_upload(uploaded)
+            st.success("CSVを読み込みました。TargetとCompsを設定します。")
+        except Exception as e:
+            st.error(f"CSV読み込みエラー: {e}")
+            return
+    else:
+        st.info("手動入力を行う場合は下のフォームで Target と Comps を入力してください（省略時は0扱い）。")
+        sample_load = st.checkbox("サンプルデータを読み込む（例：テスト用のTarget+3Comps）", value=False)
+        if sample_load:
+            # Sample target and 3 peers matching unit tests
+            target = {
+                "company_name": "TargetCo",
+                "market_cap": 0.0,
+                "shares_outstanding": 100.0,
+                "cash": 0.0,
+                "sub_debt": 0.0,
+                "minority": 0.0,
+                "sales_ltm": 200.0,
+                "sales_cy1": 220.0,
+                "sales_cy2": 242.0,
+                "ebitda_ltm": 400.0,
+                "ebitda_cy1": 440.0,
+                "ebitda_cy2": 484.0,
+                "ebit_ltm": 100.0,
+                "ebit_cy1": 110.0,
+                "ebit_cy2": 121.0,
+                "net_income_ltm": 40.0,
+                "net_income_cy1": 44.0,
+                "net_income_cy2": 48.4,
+            }
+            peers = []
+            for i in range(3):
+                peers.append(
+                    {
+                        "company_name": f"Comp{i+1}",
+                        "market_cap": 1000.0,
+                        "shares_outstanding": 10.0,
+                        "cash": 0.0,
+                        "sub_debt": 0.0,
+                        "minority": 0.0,
+                        "sales_ltm": 100.0,
+                        "sales_cy1": 100.0,
+                        "sales_cy2": 100.0,
+                        "ebitda_ltm": 200.0,
+                        "ebitda_cy1": 200.0,
+                        "ebitda_cy2": 200.0,
+                        "ebit_ltm": 50.0,
+                        "ebit_cy1": 50.0,
+                        "ebit_cy2": 50.0,
+                        "net_income_ltm": 20.0,
+                        "net_income_cy1": 20.0,
+                        "net_income_cy2": 20.0,
+                    }
+                )
+            st.success("サンプルデータを読み込みました。下の計算実行ボタンで結果を確認できます。")
+        else:
+            # For brevity implement minimal manual target input (single block, keys provided)
+            st.subheader("TargetCo 入力")
+            target = {}
+            tcol1, tcol2 = st.columns(2)
+            with tcol1:
+                target["company_name"] = st.text_input("企業名", value="TargetCo", key="target_company_name")
+                target["market_cap"] = st.number_input("市場時価総額", min_value=0.0, value=0.0, step=1.0, key="target_market_cap")
+                target["shares_outstanding"] = st.number_input("発行済株式数", min_value=0.0, value=1.0, step=1.0, key="target_shares")
+                target["cash"] = st.number_input("現預金", min_value=0.0, value=0.0, step=1.0, key="target_cash")
+            with tcol2:
+                target["sub_debt"] = st.number_input("有利子負債", min_value=0.0, value=0.0, step=1.0, key="target_sub_debt")
+                target["minority"] = st.number_input("少数株主持分", min_value=0.0, value=0.0, step=1.0, key="target_minority")
+            st.markdown("**財務（LTM / CY+1 / CY+2）**")
+            for p in PERIODS:
+                c1, c2, c3, c4 = st.columns(4)
+                with c1:
+                    target[f"sales_{p.replace('+','plus').lower()}"] = st.number_input(f"売上高 {p}", value=0.0, key=f"target_sales_{p}")
+                with c2:
+                    target[f"ebitda_{p.replace('+','plus').lower()}"] = st.number_input(f"EBITDA {p}", value=0.0, key=f"target_ebitda_{p}")
+                with c3:
+                    target[f"ebit_{p.replace('+','plus').lower()}"] = st.number_input(f"EBIT {p}", value=0.0, key=f"target_ebit_{p}")
+                with c4:
+                    target[f"net_income_{p.replace('+','plus').lower()}"] = st.number_input(f"純利益 {p}", value=0.0, key=f"target_net_{p}")
+
+            # Manual comps entry: allow a small number via expanders
+            st.subheader("類似企業（手動入力またはCSVで最大15社）")
+            peers: List[Dict[str, Any]] = []
+            num_peers = st.number_input("手動で入力するCompsの数", min_value=0, max_value=15, value=0, step=1, key="num_peers_manual")
+            for i in range(int(num_peers)):
+                with st.expander(f"Comp {i+1}"):
+                    c = {}
+                    c["company_name"] = st.text_input("企業名", value=f"Comp{i+1}", key=f"comp_name_{i}")
+                    c["market_cap"] = st.number_input("市場時価総額", min_value=0.0, value=0.0, key=f"comp_market_{i}")
+                    c["shares_outstanding"] = st.number_input("発行済株式数", min_value=0.0, value=1.0, key=f"comp_shares_{i}")
+                    c["cash"] = st.number_input("現預金", min_value=0.0, value=0.0, key=f"comp_cash_{i}")
+                    c["sub_debt"] = st.number_input("有利子負債", min_value=0.0, value=0.0, key=f"comp_debt_{i}")
+                    c["minority"] = st.number_input("少数株主持分", min_value=0.0, value=0.0, key=f"comp_min_{i}")
+                    for p in PERIODS:
+                        c[f"sales_{p.lower().replace('+','_plus')}"] = st.number_input(f"売上高 {p}", value=0.0, key=f"comp_sales_{i}_{p}")
+                        c[f"ebitda_{p.lower().replace('+','_plus')}"] = st.number_input(f"EBITDA {p}", value=0.0, key=f"comp_ebitda_{i}_{p}")
+                        c[f"ebit_{p.lower().replace('+','_plus')}"] = st.number_input(f"EBIT {p}", value=0.0, key=f"comp_ebit_{i}_{p}")
+                        c[f"net_income_{p.lower().replace('+','_plus')}"] = st.number_input(f"純利益 {p}", value=0.0, key=f"comp_net_{i}_{p}")
+                    peers.append(c)
+        # For brevity implement minimal manual target input
+        st.subheader("TargetCo 入力")
+        target = {}
+        tcol1, tcol2 = st.columns(2)
+        with tcol1:
+            target["company_name"] = st.text_input("企業名", value="TargetCo")
+            target["market_cap"] = st.number_input("市場時価総額", min_value=0.0, value=0.0, step=1.0)
+            target["shares_outstanding"] = st.number_input("発行済株式数", min_value=0.0, value=1.0, step=1.0)
+            target["cash"] = st.number_input("現預金", min_value=0.0, value=0.0, step=1.0)
+        with tcol2:
+            target["sub_debt"] = st.number_input("有利子負債", min_value=0.0, value=0.0, step=1.0)
+            target["minority"] = st.number_input("少数株主持分", min_value=0.0, value=0.0, step=1.0)
+        st.markdown("**財務（LTM / CY+1 / CY+2）**")
+        for p in PERIODS:
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                target[f"sales_{p.replace('+','plus').lower()}"] = st.number_input(f"売上高 {p}", value=0.0, key=f"target_sales_{p}")
+            with c2:
+                target[f"ebitda_{p.replace('+','plus').lower()}"] = st.number_input(f"EBITDA {p}", value=0.0, key=f"target_ebitda_{p}")
+            with c3:
+                target[f"ebit_{p.replace('+','plus').lower()}"] = st.number_input(f"EBIT {p}", value=0.0, key=f"target_ebit_{p}")
+            with c4:
+                target[f"net_income_{p.replace('+','plus').lower()}"] = st.number_input(f"純利益 {p}", value=0.0, key=f"target_net_{p}")
+
+        # Manual comps entry: allow a small number via expanders
+        st.subheader("類似企業（手動入力またはCSVで最大15社）")
+        peers: List[Dict[str, Any]] = []
+        num_peers = st.number_input("手動で入力するCompsの数", min_value=0, max_value=15, value=0, step=1)
+        for i in range(int(num_peers)):
+            with st.expander(f"Comp {i+1}"):
+                c = {}
+                c["company_name"] = st.text_input("企業名", value=f"Comp{i+1}", key=f"comp_name_{i}")
+                c["market_cap"] = st.number_input("市場時価総額", min_value=0.0, value=0.0, key=f"comp_market_{i}")
+                c["shares_outstanding"] = st.number_input("発行済株式数", min_value=0.0, value=1.0, key=f"comp_shares_{i}")
+                c["cash"] = st.number_input("現預金", min_value=0.0, value=0.0, key=f"comp_cash_{i}")
+                c["sub_debt"] = st.number_input("有利子負債", min_value=0.0, value=0.0, key=f"comp_debt_{i}")
+                c["minority"] = st.number_input("少数株主持分", min_value=0.0, value=0.0, key=f"comp_min_{i}")
+                for p in PERIODS:
+                    c[f"sales_{p.lower().replace('+','_plus')}"] = st.number_input(f"売上高 {p}", value=0.0, key=f"comp_sales_{i}_{p}")
+                    c[f"ebitda_{p.lower().replace('+','_plus')}"] = st.number_input(f"EBITDA {p}", value=0.0, key=f"comp_ebitda_{i}_{p}")
+                    c[f"ebit_{p.lower().replace('+','_plus')}"] = st.number_input(f"EBIT {p}", value=0.0, key=f"comp_ebit_{i}_{p}")
+                    c[f"net_income_{p.lower().replace('+','_plus')}"] = st.number_input(f"純利益 {p}", value=0.0, key=f"comp_net_{i}_{p}")
+                peers.append(c)
+
+    # Calculation and Output
+    if st.button("計算実行"):
+        if not target:
+            st.error("Targetのデータが不足しています。")
+            return
+
+        # prepare peers: if uploaded provided, peers variable set above
+        try:
+            stats = aggregate_peer_stats(peers)
+            valuation = apply_multiples_to_target(target, stats, method=method)
+        except Exception as e:
+            st.error(f"計算エラー: {e}")
+            return
+
+        st.subheader("Benchmarking（マルチプル要約）")
+        # Build table for display: rows = metric x period x stats
+        display_rows = []
+        for metric in ["ev_sales", "ev_ebitda", "ev_ebit", "pe"]:
+            for p in PERIODS:
+                s = stats.get(metric, {}).get(p, {})
+                display_rows.append({"Metric": metric, "Period": p, "Min": s.get("min"), "Max": s.get("max"), "Avg": s.get("avg"), "Median": s.get("median")})
+        st.dataframe(display_rows, use_container_width=True)
+
+        st.subheader("企業価値評価（Output）")
+        out_rows = []
+        for metric in ["ev_sales", "ev_ebitda", "ev_ebit", "pe"]:
+            for p in PERIODS:
+                item = valuation["by_metric"][metric][p]
+                out_rows.append({"Metric": metric, "Period": p, "Multiple": item["multiple"], "Implied EV": item["implied_ev"], "Implied Equity": item["implied_equity"], "Implied Price": item["implied_price"]})
+        st.dataframe(out_rows, use_container_width=True)
 
 
-def main() -> None:
+def main():
     if st is None:
-        raise RuntimeError("Streamlitがインストールされていません。")
-    render_app()
+        print("Streamlit is not available in this environment. Import the module's functions for testing.")
+        return
+    _render_ui()
 
 
 if __name__ == "__main__":

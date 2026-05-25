@@ -1,0 +1,5 @@
+company_name,market_cap,shares_outstanding,cash,sub_debt,minority,sales_ltm,sales_cy1,sales_cy2,ebitda_ltm,ebitda_cy1,ebitda_cy2,ebit_ltm,ebit_cy1,ebit_cy2,net_income_ltm,net_income_cy1,net_income_cy2
+TargetCo,0,100,0,0,0,200,220,242,400,440,484,100,110,121,40,44,48.4
+Comp1,1000,10,0,0,0,100,100,100,200,200,200,50,50,50,20,20,20
+Comp2,1000,10,0,0,0,100,100,100,200,200,200,50,50,50,20,20,20
+Comp3,1000,10,0,0,0,100,100,100,200,200,200,50,50,50,20,20,20
