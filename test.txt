@@ -1,0 +1,12 @@
+python3 - <<'PY'
+import requests, os
+t = "uBP41sdTdca7DCNtjTzYnhVyxI3r29puRxFvnKpbyTs"
+# JSON
+r1 = requests.post("https://api.jquants.com/v1/token/auth_refresh", json={"refreshtoken": t})
+print("JSON status", r1.status_code)
+print(r1.text)
+# form
+r2 = requests.post("https://api.jquants.com/v1/token/auth_refresh", data={"refreshtoken": t})
+print("FORM status", r2.status_code)
+print(r2.text)
+PY
