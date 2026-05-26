@@ -28,6 +28,10 @@ streamlit run app.py
 
 - [comps_template.csv](comps_template.csv)
 
+注意: CSV内の金額項目は「百万円」単位で記載してください（例：1000 は 1000 百万円 = 1,000,000,000 円 を意味します）。
+
+補足: Excel形式（.xlsx）でも同じヘッダー構成で読み込み可能です。Excelを使う場合も金額は百万円単位で入力してください。
+
 ヘッダーは次の列（順序・名称を厳守）です:
 
 company_name, market_cap, shares_outstanding, cash, sub_debt, minority, sales_ltm, sales_cy1, sales_cy2, ebitda_ltm, ebitda_cy1, ebitda_cy2, ebit_ltm, ebit_cy1, ebit_cy2, net_income_ltm, net_income_cy1, net_income_cy2
